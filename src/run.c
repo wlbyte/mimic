@@ -125,13 +125,27 @@ static inline int tc_hook_create_attach(struct bpf_tc_hook* hook, struct bpf_tc_
   }
   opts->prog_fd = bpf_program__fd(prog);
   struct bpf_tc_opts opts2 = *opts;
-  if ((retcode = bpf_tc_attach(hook, opts)) < 0) {
-    if (retcode == -EEXIST) {
-      tc_hook_cleanup(hook, opts);
-      *opts = opts2;
+
+  for (int pref = 50; pref <= 100; pref++) {
+      opts->priority = pref;
+      opts->handle = pref; // 绑定 handle，确保唯一性
       retcode = bpf_tc_attach(hook, opts);
-    }
+      if (retcode == 0) {
+          log_info("Attached at priority %d", pref);
+          break;
+      } else if (retcode == -EEXIST) {
+          tc_hook_cleanup(hook, opts);
+          *opts = opts2;
+          opts->priority = pref;
+          opts->handle = pref;
+          retcode = bpf_tc_attach(hook, opts);
+          if (retcode == 0) {
+              log_info("Attached at priority %d!", pref);
+              break;
+          }
+      }
   }
+
   try(retcode, _("failed to attach to TC egress hook: %s"), strret);
   return 0;
 }
