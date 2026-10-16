@@ -109,10 +109,15 @@ const struct argp run_argp = {
   .doc = N_("\vSee mimic(1) for detailed usage."),
 };
 
+// Detach the TC egress filter that this Mimic instance attached.
+//
+// NOTE: only detaches Mimic's own filter, identified by its exact (handle,
+// priority). Do NOT call bpf_tc_hook_destroy(): for attach_point BPF_TC_EGRESS,
+// libbpf implements it as a flush of ALL egress filters on the clsact qdisc,
+// which would wipe unrelated TC configuration on the interface.
 static inline int tc_hook_cleanup(struct bpf_tc_hook* hook, struct bpf_tc_opts* opts) {
   opts->flags = opts->prog_fd = opts->prog_id = 0;
-  int ret = bpf_tc_detach(hook, opts);
-  return ret ?: bpf_tc_hook_destroy(hook);
+  return bpf_tc_detach(hook, opts);
 }
 
 static inline int tc_hook_create_attach(struct bpf_tc_hook* hook, struct bpf_tc_opts* opts,
@@ -124,26 +129,20 @@ static inline int tc_hook_create_attach(struct bpf_tc_hook* hook, struct bpf_tc_
     ret(retcode, "failed to create TC egress hook: %s", strerror(-retcode));
   }
   opts->prog_fd = bpf_program__fd(prog);
-  struct bpf_tc_opts opts2 = *opts;
 
+  // Try a range of (priority == handle) combinations so we don't collide with
+  // filters installed by other software. On a collision (-EEXIST) simply move to
+  // the next value; never detach or flush the conflicting filter, or we would
+  // destroy unrelated TC configuration on the interface.
   for (int pref = 50; pref <= 100; pref++) {
-      opts->priority = pref;
-      opts->handle = pref; // 绑定 handle，确保唯一性
-      retcode = bpf_tc_attach(hook, opts);
-      if (retcode == 0) {
-          log_info("Attached at priority %d", pref);
-          break;
-      } else if (retcode == -EEXIST) {
-          tc_hook_cleanup(hook, opts);
-          *opts = opts2;
-          opts->priority = pref;
-          opts->handle = pref;
-          retcode = bpf_tc_attach(hook, opts);
-          if (retcode == 0) {
-              log_info("Attached at priority %d!", pref);
-              break;
-          }
-      }
+    opts->priority = pref;
+    opts->handle = pref; // 绑定 handle，确保唯一性
+    retcode = bpf_tc_attach(hook, opts);
+    if (retcode == 0) {
+      log_info("Attached egress filter at priority %d", pref);
+      break;
+    }
+    if (retcode != -EEXIST) break;
   }
 
   try(retcode, _("failed to attach to TC egress hook: %s"), strret);
@@ -582,8 +581,10 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
     .sz = sizeof(tc_hook_egress), .ifindex = ifindex, .attach_point = BPF_TC_EGRESS};
   tc_opts_egress =
     (typeof(tc_opts_egress)){.sz = sizeof(tc_opts_egress), .handle = 1, .priority = 1};
-  tc_hook_created = true;
   try2(tc_hook_create_attach(&tc_hook_egress, &tc_opts_egress, skel->progs.egress_handler));
+  // Only set after a successful attach, so a failed attach never goes on to
+  // detach a filter that isn't ours (which may wipe another software's filter).
+  tc_hook_created = true;
 
   // ring buffer
   struct bpf_prog_info prog_info = {};
