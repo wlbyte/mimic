@@ -253,6 +253,8 @@ static int store_packet(struct bpf_map* conns, struct conn_tuple* conn_key, cons
                         __u16 len, bool l4_csum_partial) {
   int retcode;
   struct connection conn = {};
+  bool newly_allocated = false;
+
   try2(bpf_map__lookup_elem(conns, conn_key, sizeof(*conn_key), &conn, sizeof(conn), BPF_F_LOCK));
 
   if (conn.state != CONN_SYN_SENT && conn.state != CONN_SYN_RECV) {
@@ -262,18 +264,26 @@ static int store_packet(struct bpf_map* conns, struct conn_tuple* conn_key, cons
     return 0;
   }
 
-  if (!conn.pktbuf) conn.pktbuf = (__u64)(uintptr_t)try2_p(packet_buf_new(conn_key));
+  if (!conn.pktbuf) {
+      conn.pktbuf = (__u64)(uintptr_t)try2_p(packet_buf_new(conn_key));
+      newly_allocated = true; 
+  }
+
   try2_e(packet_buf_push((struct packet_buf*)(uintptr_t)conn.pktbuf, data, len, l4_csum_partial));
   try2(bpf_map__update_elem(conns, conn_key, sizeof(*conn_key), &conn, sizeof(conn),
                             BPF_EXIST | BPF_F_LOCK));
   return 0;
+
 cleanup:
   if (retcode == -ENOENT) {
     log_conn(LOG_DEBUG, conn_key,
              _("connection released when attempting to store packet; freeing packet buffer"));
     retcode = 0;
   }
-  if (conn.pktbuf) packet_buf_free((struct packet_buf*)(uintptr_t)conn.pktbuf);
+
+  if (newly_allocated && conn.pktbuf) {
+      packet_buf_free((struct packet_buf*)(uintptr_t)conn.pktbuf);
+  }
   return retcode;
 }
 
