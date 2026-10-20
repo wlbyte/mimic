@@ -363,6 +363,17 @@ int ingress_handler(struct xdp_md* xdp) {
   }
   if (will_drop) return XDP_DROP;
 
+  if (use_cache) {
+    struct peer_endpoint_key peer_key;
+    struct in6_addr src_ip = ipv4 ? ipv4_mapped(ipv4->saddr) : ipv6->saddr;
+    make_peer_key(&peer_key, &src_ip, ntohs(tcp->source));
+
+    struct peer_info_val peer_val = {
+      .last_seen = tstamp,
+    };
+    bpf_map_update_elem(&mimic_peer_cache, &peer_key, &peer_val, BPF_ANY);
+  }
+
   __u32 padding = conn_padding(conn, ntohl(tcp->seq), ntohl(tcp->ack_seq));
   size_t reserve_len = TCP_UDP_HEADER_DIFF + padding;
   if (ipv4) {

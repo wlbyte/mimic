@@ -31,6 +31,7 @@ struct args {
       struct filter_settings gsettings;
       int xdp_mode;
       enum link_type link_type;
+      bool use_cache;
 #ifdef MIMIC_USE_LIBXDP
       bool use_libxdp;
 #endif

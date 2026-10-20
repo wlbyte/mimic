@@ -291,6 +291,11 @@ int parse_config_file(FILE* file, struct run_args* args) {
     } else if (strcmp(k, "xdp_mode") == 0) {
       args->xdp_mode = try(parse_xdp_mode(v));
 
+    } else if (strcmp(k, "cache") == 0) {
+      __s16 result = 0;
+      try(parse_bool(v, &result));
+      args->use_cache = result;
+
 #ifdef MIMIC_USE_LIBXDP
     } else if (strcmp(k, "use_libxdp") == 0) {
       __s16 result = 0;

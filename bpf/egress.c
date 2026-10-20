@@ -114,7 +114,40 @@ int egress_handler(struct __sk_buff* skb) {
 
   __u64 tstamp = bpf_ktime_get_boot_ns();
 
-  struct filter_settings* settings = matches_whitelist(QUARTET_UDP);
+  struct filter_settings* settings = NULL;
+
+  if (use_cache) {
+    struct filter local = {.origin = O_LOCAL}, remote = {.origin = O_REMOTE};
+    local.port = ntohs(udp->source);
+    remote.port = ntohs(udp->dest);
+    local.ip = ipv4 ? ipv4_mapped(ipv4->saddr) : ipv6->saddr;
+    remote.ip = ipv4 ? ipv4_mapped(ipv4->daddr) : ipv6->daddr;
+
+    // 1. 先匹配 local=
+    struct filter_info* local_info = bpf_map_lookup_elem(&mimic_whitelist, &local);
+    if (!local_info) return TC_ACT_OK;
+
+    // 2. local= 匹配成功后，再匹配 remote= 或 cache
+    struct filter_info* remote_info = bpf_map_lookup_elem(&mimic_whitelist, &remote);
+    if (remote_info) {
+      // 如果 remote= 匹配了就不再匹配 cache
+      settings = &remote_info->settings;
+    } else {
+      // 如果 remote 没有配置就查 cache
+      struct peer_endpoint_key peer_key;
+      make_peer_key(&peer_key, &remote.ip, remote.port);
+
+      struct peer_info_val* val = bpf_map_lookup_elem(&mimic_peer_cache, &peer_key);
+      if (val && time_diff(SECOND, tstamp, val->last_seen) < 60) {
+        settings = &local_info->settings;
+      } else {
+        return TC_ACT_OK;
+      }
+    }
+  } else {
+    settings = matches_whitelist(QUARTET_UDP);
+  }
+
   if (!settings) return TC_ACT_OK;
   struct conn_tuple conn_key = gen_conn_key(QUARTET_UDP);
   struct connection* conn = bpf_map_lookup_elem(&mimic_conns, &conn_key);

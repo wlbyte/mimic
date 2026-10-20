@@ -9,6 +9,7 @@
 
 extern int log_verbosity;
 extern enum link_type link_type;
+extern int use_cache;
 
 extern struct mimic_whitelist_map {
   __uint(type, BPF_MAP_TYPE_HASH);
@@ -30,6 +31,30 @@ extern struct mimic_rb_map {
   __uint(type, BPF_MAP_TYPE_RINGBUF);
   __uint(max_entries, 1 << 20);
 } mimic_rb;
+
+struct peer_endpoint_key {
+  struct in6_addr ip;
+  __u16 port;
+  __u16 _pad;
+};
+
+struct peer_info_val {
+  __u64 last_seen;
+};
+
+extern struct peer_cache_map {
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(max_entries, 10240);
+  __type(key, struct peer_endpoint_key);
+  __type(value, struct peer_info_val);
+} mimic_peer_cache;
+
+static __always_inline void make_peer_key(struct peer_endpoint_key* key, const struct in6_addr* ip,
+                                          __u16 port) {
+  key->ip = *ip;
+  key->port = port;
+  key->_pad = 0;
+}
 
 #define IPV4_CSUM_OFF (offsetof(struct iphdr, check))
 #define TCP_UDP_HEADER_DIFF (sizeof(struct tcphdr) - sizeof(struct udphdr))
@@ -57,8 +82,14 @@ static __always_inline struct filter_settings* matches_whitelist(QUARTET_DEF) {
   remote.ip = ipv4 ? ipv4_mapped(ipv4->daddr) : ipv6 ? ipv6->daddr : IP_ANY;
 
   struct filter_info* result = bpf_map_lookup_elem(&mimic_whitelist, &local);
-  result = result ?: bpf_map_lookup_elem(&mimic_whitelist, &remote);
-  return result ? &result->settings : NULL;
+  if (result)
+    return &result->settings;
+
+  result = bpf_map_lookup_elem(&mimic_whitelist, &remote);
+  if (result)
+    return &result->settings;
+
+  return NULL;
 }
 
 static __always_inline struct conn_tuple gen_conn_key(QUARTET_DEF) {

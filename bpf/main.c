@@ -8,10 +8,12 @@
 
 int log_verbosity;
 enum link_type link_type;
+int use_cache;
 
 struct mimic_whitelist_map mimic_whitelist SEC(".maps");
 struct mimic_conns_map mimic_conns SEC(".maps");
 struct mimic_rb_map mimic_rb SEC(".maps");
+struct peer_cache_map mimic_peer_cache SEC(".maps");
 
 int send_ctrl_packet(struct conn_tuple* conn, __be32 flags, __u32 seq, __u32 ack_seq,
                      __u32 window) {
