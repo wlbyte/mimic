@@ -10,6 +10,7 @@
 extern int log_verbosity;
 extern enum link_type link_type;
 extern int use_cache;
+extern int cache_ttl;
 
 extern struct mimic_whitelist_map {
   __uint(type, BPF_MAP_TYPE_HASH);

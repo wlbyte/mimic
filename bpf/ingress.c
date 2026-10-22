@@ -183,6 +183,12 @@ int ingress_handler(struct xdp_md* xdp) {
 
   // Quick path for RST and FIN
   if (unlikely(tcp->rst || tcp->fin)) {
+    if (tcp->rst && use_cache) {
+      struct peer_endpoint_key peer_key;
+      struct in6_addr src_ip = ipv4 ? ipv4_mapped(ipv4->saddr) : ipv6->saddr;
+      make_peer_key(&peer_key, &src_ip, ntohs(tcp->source));
+      bpf_map_delete_elem(&mimic_peer_cache, &peer_key);
+    }
     if (conn) {
       __u32 cooldown;
       bpf_spin_lock(&conn->lock);

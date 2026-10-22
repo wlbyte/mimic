@@ -65,6 +65,7 @@ static const struct argp_option options[] = {
    N_("Padding size appended to each packet. Pass 'random' to use random padding."), 2},
   {"max-window", 'W', NULL, 0, N_("Always use maximum window size in TCP packets"), 2},
   {"cache", 'c', NULL, 0, N_("Match egress traffic against dynamically learned peer IP and port"), 2},
+  {"cache-ttl", 't', N_("SECONDS"), 0, N_("Timeout in seconds before cached peer entries expire (default: 60)"), 2},
   {"file", 'F', N_("PATH"), 0, N_("Load configuration from file"), 3},
   {"check", 0xffff, NULL, 0, N_("Check if Mimic could be deployed, and exit"), 4},
   {},
@@ -90,6 +91,7 @@ static inline error_t args_parse_opt(int key, char* arg, struct argp_state* stat
     case 'p': try(parse_padding(arg, &args->gsettings.padding)); break;
     case 'W': args->gsettings.max_window = true; break;
     case 'c': args->use_cache = true; break;
+    case 't': try(parse_cache_ttl(arg, &args->cache_ttl)); break;
     case 'F': args->file = arg; break;
     case 0xffff: args->check = true; break;
     case ARGP_KEY_ARG:
@@ -552,6 +554,7 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
   skel->bss->log_verbosity = log_verbosity;
   skel->bss->link_type = args->link_type;
   skel->bss->use_cache = args->use_cache;
+  skel->bss->cache_ttl = args->cache_ttl;
 
   bpf_program__set_flags(skel->progs.ingress_handler, BPF_F_ANY_ALIGNMENT);
   bpf_program__set_flags(skel->progs.egress_handler, BPF_F_ANY_ALIGNMENT);
@@ -818,6 +821,8 @@ int subcmd_run(struct run_args* args) {
       ret(-errno, _("failed to open configuration file at %s: %s"), args->file, strerror(errno));
     }
   }
+
+  if (args->cache_ttl <= 0) args->cache_ttl = 60;
 
   if (access(MIMIC_RUNTIME_DIR, R_OK | W_OK) < 0) {
     if (errno == ENOENT) {

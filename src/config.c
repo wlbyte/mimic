@@ -161,6 +161,10 @@ int parse_padding(const char* str, __s16* padding) {
   return 0;
 }
 
+int parse_cache_ttl(const char* str, int* ttl) {
+  return parse_int(str, ttl, 1, 86400);
+}
+
 static int parse_setting(const char* k, char* v, struct filter_settings* settings) {
   if (strcmp("handshake", k) == 0)
     try(parse_handshake(v, &settings->handshake));
@@ -295,6 +299,9 @@ int parse_config_file(FILE* file, struct run_args* args) {
       __s16 result = 0;
       try(parse_bool(v, &result));
       args->use_cache = result;
+
+    } else if (strcmp(k, "cache_ttl") == 0) {
+      try(parse_cache_ttl(v, &args->cache_ttl));
 
 #ifdef MIMIC_USE_LIBXDP
     } else if (strcmp(k, "use_libxdp") == 0) {

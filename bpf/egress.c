@@ -138,7 +138,8 @@ int egress_handler(struct __sk_buff* skb) {
       make_peer_key(&peer_key, &remote.ip, remote.port);
 
       struct peer_info_val* val = bpf_map_lookup_elem(&mimic_peer_cache, &peer_key);
-      if (val && time_diff(SECOND, tstamp, val->last_seen) < 60) {
+      __u32 ttl = cache_ttl > 0 ? (__u32)cache_ttl : 60;
+      if (val && time_diff(SECOND, tstamp, val->last_seen) < ttl) {
         settings = &local_info->settings;
       } else {
         return TC_ACT_OK;

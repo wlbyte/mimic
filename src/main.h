@@ -32,6 +32,7 @@ struct args {
       int xdp_mode;
       enum link_type link_type;
       bool use_cache;
+      int cache_ttl;
 #ifdef MIMIC_USE_LIBXDP
       bool use_libxdp;
 #endif
@@ -70,6 +71,7 @@ int parse_link_type(const char* str, enum link_type* link);
 int parse_handshake(char* str, struct filter_handshake* h);
 int parse_keepalive(char* str, struct filter_keepalive* k);
 int parse_padding(const char* str, __s16* padding);
+int parse_cache_ttl(const char* str, int* ttl);
 int parse_filter(char* filter_str, struct filter_list* list, unsigned int* wildcard_count);
 int parse_xdp_mode(const char* mode);
 int parse_config_file(FILE* file, struct run_args* args);

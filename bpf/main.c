@@ -9,6 +9,7 @@
 int log_verbosity;
 enum link_type link_type;
 int use_cache;
+int cache_ttl;
 
 struct mimic_whitelist_map mimic_whitelist SEC(".maps");
 struct mimic_conns_map mimic_conns SEC(".maps");
