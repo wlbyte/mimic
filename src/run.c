@@ -508,6 +508,167 @@ static inline int terminate_all_conns(int mimic_conns_fd, const char* ifname) {
   return 0;
 }
 
+// True if two whitelist filters reference the same map entry.
+static inline bool filter_eq(const struct filter* a, const struct filter* b) {
+  return a->origin == b->origin && a->port == b->port &&
+         __builtin_memcmp(&a->ip, &b->ip, sizeof(a->ip)) == 0;
+}
+
+static inline bool filter_list_contains(const struct filter_list* list, const struct filter* f) {
+  for (struct filter_node* i = list->head; i; i = i->next)
+    if (filter_eq(&i->filter, f)) return true;
+  return false;
+}
+
+// Remove whitelist entries derived from the current wildcard list across every local address.
+static void wildcard_remove_derived(struct ip_delta_list* ips, struct bpf_map* map,
+                                    struct filter_node** wildcards, unsigned int count) {
+  for (struct ip_delta_list* ip = ips; ip; ip = ip->next) {
+    for (unsigned int i = 0; i < count; i++) {
+      if (ip_proto(&wildcards[i]->filter.ip) != ip_proto(&ip->ip)) continue;
+      struct filter f = {.origin = O_LOCAL, .ip = ip->ip, .port = wildcards[i]->filter.port};
+      int rc = bpf_map__delete_elem(map, &f, sizeof(struct filter), 0);
+      if (rc && rc != -ENOENT) {
+        char fmt[FILTER_FMT_MAX_LEN];
+        filter_fmt(&f, fmt);
+        log_error(_("failed to remove wildcard-derived filter `%s`: %s"), fmt, strerror(-rc));
+      }
+    }
+  }
+}
+
+// Re-read the configuration file and atomically apply the runtime-reloadable parts (log verbosity,
+// filter whitelist and their settings). On any error the running configuration is left untouched.
+static void reload_config(struct run_args* args, struct mimic_bpf* skel, int ifindex, int lock_fd,
+                          struct lock_content* lock, int epfd, int* rtnl, void** wildcards_buf,
+                          struct filter_node*** wildcards, unsigned int* wildcards_len) {
+  if (!args->file) {
+    log_warn(_("cannot reload configuration: no configuration file was given at startup"));
+    return;
+  }
+
+  FILE* conf = fopen(args->file, "r");
+  if (!conf) {
+    log_error(_("failed to open configuration file %s: %s"), args->file, strerror(errno));
+    return;
+  }
+
+  // Parse into a temporary structure so a malformed file never corrupts the running state.
+  struct run_args new_args = {};
+  new_args.gsettings = DEFAULT_SETTINGS;
+  int old_verbosity = log_verbosity;
+  if (parse_config_file(conf, &new_args) < 0) {
+    log_verbosity = old_verbosity;
+    filter_list_destroy(&new_args.filters);
+    fclose(conf);
+    log_error(_("failed to parse configuration file %s; keeping current configuration"),
+              args->file);
+    return;
+  }
+  fclose(conf);
+
+  log_info(_("reloading configuration from %s"), args->file);
+
+  // 1. Log verbosity takes effect immediately (also mirrors to the BPF log path).
+  skel->bss->log_verbosity = log_verbosity;
+
+  // 2. Reconcile the whitelist: add/update new filters, drop removed ones. Existing filters are
+  //    updated in place, so established connections keep matching them.
+  for (struct filter_node* i = new_args.filters.head; i; i = i->next) {
+    filter_settings_apply(&i->info.settings, &new_args.gsettings);
+    int rc = bpf_map__update_elem(skel->maps.mimic_whitelist, &i->filter, sizeof(struct filter),
+                                  &i->info, sizeof(struct filter_info), BPF_ANY);
+    if (rc) {
+      char fmt[FILTER_FMT_MAX_LEN];
+      filter_fmt(&i->filter, fmt);
+      log_error(_("failed to update filter `%s`: %s"), fmt, strerror(-rc));
+    }
+  }
+  for (struct filter_node* i = args->filters.head; i; i = i->next) {
+    if (filter_list_contains(&new_args.filters, &i->filter)) continue;
+    int rc = bpf_map__delete_elem(skel->maps.mimic_whitelist, &i->filter, sizeof(struct filter), 0);
+    if (rc && rc != -ENOENT) {
+      char fmt[FILTER_FMT_MAX_LEN];
+      filter_fmt(&i->filter, fmt);
+      log_error(_("failed to remove filter `%s`: %s"), fmt, strerror(-rc));
+    }
+  }
+
+  bool had_wildcards = args->wildcard_count > 0;
+  bool has_wildcards = new_args.wildcard_count > 0;
+
+  // 3. Snapshot the current local addresses; used to reconcile wildcard-derived entries.
+  struct ip_delta_list* ips raii(ip_delta_list_destroy) = NULL;
+  if ((has_wildcards || had_wildcards) && rtnl_get_addrs(ifindex, &ips) < 0)
+    log_warn(_("failed to query local addresses while reloading configuration"));
+
+  // Drop derived entries of the previous wildcard set before swapping in the new one.
+  if (had_wildcards && ips)
+    wildcard_remove_derived(ips, skel->maps.mimic_whitelist, *wildcards, args->wildcard_count);
+
+  // Move the new filter list / global settings / wildcard count into place.
+  filter_list_destroy(&args->filters);
+  args->filters = new_args.filters;
+  new_args.filters.head = new_args.filters.tail = NULL;
+  args->gsettings = new_args.gsettings;
+  args->wildcard_count = new_args.wildcard_count;
+
+  // Rebuild the wildcard pointer array from the new filter list.
+  free(*wildcards_buf);
+  *wildcards_buf = NULL;
+  *wildcards = NULL;
+  *wildcards_len = 0;
+  if (has_wildcards) {
+    *wildcards_buf = calloc(args->wildcard_count, sizeof(struct filter_node*));
+    if (!*wildcards_buf) {
+      log_error(_("failed to allocate wildcard list during reload; wildcard filters are disabled"));
+      args->wildcard_count = 0;
+      has_wildcards = false;
+    } else {
+      *wildcards = (struct filter_node**)*wildcards_buf;
+      for (struct filter_node* i = args->filters.head; i; i = i->next) {
+        if (ip_is_wildcard(&i->filter.ip) && i->filter.origin == O_LOCAL) {
+          if (*wildcards_len >= args->wildcard_count) break;
+          (*wildcards)[(*wildcards_len)++] = i;
+        }
+      }
+    }
+  }
+
+  // 4. Keep the netlink socket and wildcard-derived whitelist entries in sync with the new set.
+  if (has_wildcards) {
+    if (*rtnl < 0) {
+      int sock = rtnl_create_socket();
+      if (sock < 0) {
+        log_error(_("failed to create netlink socket during reload: %s"), strerror(-sock));
+      } else {
+        struct epoll_event ev = {.events = EPOLLIN, .data.fd = sock};
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev) < 0) {
+          log_error(_("failed to register netlink socket during reload: %s"), strerror(errno));
+          close(sock);
+        } else {
+          *rtnl = sock;
+        }
+      }
+    }
+    if (*wildcards && ips)
+      ip_delta_list_apply(ips, skel->maps.mimic_whitelist, *wildcards, args->wildcard_count);
+  } else if (*rtnl >= 0) {
+    epoll_ctl(epfd, EPOLL_CTL_DEL, *rtnl, NULL);
+    close(*rtnl);
+    *rtnl = -1;
+  }
+
+  // 5. Persist the updated global settings so `mimic show` stays in sync.
+  lock->settings = args->gsettings;
+  if (ftruncate(lock_fd, 0) == 0 && lseek(lock_fd, 0, SEEK_SET) == 0) {
+    if (write_lock_file(lock_fd, lock) < 0)
+      log_warn(_("failed to update lock file: %s"), strerror(errno));
+  } else {
+    log_warn(_("failed to truncate lock file: %s"), strerror(errno));
+  }
+}
+
 static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname, int ifindex) {
   int retcode;
   struct mimic_bpf* skel = NULL;
@@ -670,6 +831,7 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
   sigset_t mask = {};
   sigaddset(&mask, SIGINT);
   sigaddset(&mask, SIGTERM);
+  sigaddset(&mask, SIGHUP);
   sfd = try2_e(signalfd(-1, &mask, SFD_NONBLOCK), _("error creating signalfd: %s"), strret);
   ev = (typeof(ev)){.events = EPOLLIN | EPOLLET, .data.fd = sfd};
   try2_e(epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &ev), _("epoll_ctl error: %s"), strret);
@@ -713,6 +875,9 @@ static inline int run_bpf(struct run_args* args, int lock_fd, const char* ifname
           const char* sigstr = siginfo.ssi_signo == SIGINT ? "SIGINT" : "SIGTERM";
           log_warn(_("%s received, exiting"), sigstr);
           cleanup(0);
+        } else if (siginfo.ssi_signo == SIGHUP) {
+          reload_config(args, skel, ifindex, lock_fd, &lock_content, epfd, &rtnl, &wildcards_buf,
+                        &wildcards, &wildcards_len);
         }
 
       } else if (events[i].data.fd == timer) {

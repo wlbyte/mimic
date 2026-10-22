@@ -90,3 +90,6 @@ Mimic is a high-performance UDP-to-TCP obfuscator designed to bypass UDP QoS thr
 - **C Standard**: C99 with GNU extensions (`-std=gnu99`).
 - **Formatting**: Google C style with 2-space indentation and 100-character line limit (configured in `.clang-format`).
 - **Header Guards**: `MIMIC_<DIR>_<NAME>_H` format (e.g., `MIMIC_COMMON_DEFS_H`).
+
+## Development Workflow & State Handover (必读规范)
+- **断点继承准则**：开启新会话或接手新任务时，第一步必须自动静默读取仓库根目录下的 `PROGRESS.md`
